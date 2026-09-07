@@ -813,6 +813,7 @@ ROOM_find_or_create_random = global.ROOM_find_or_create_random = (type, player_i
   if result.random_type=='S' then result.welcome2 = '${random_duel_enter_room_single}'
   else if result.random_type=='M' then result.welcome2 = '${random_duel_enter_room_match}'
   else if result.random_type=='T' then result.welcome2 = '${random_duel_enter_room_tag}'
+  else if result.random_type=='TT' then result.welcome2 = '天梯模式:比赛决斗,不计入约战,计入天梯战绩'
   else result.welcome2 = settings.modules.random_duel.extra_modes[type]?.welcome ? ''
   return result
 
@@ -1933,7 +1934,11 @@ class Room
     return
 
   getMaskedPlayerName: (player, sight_player) ->
-    if not settings.modules.hide_name or (sight_player and player == sight_player) or not (@random_type or @arena)
+    if sight_player and player == sight_player
+      return player.name
+    if @random_type == 'TT' and @duel_stage == ygopro.constants.DUEL_STAGE.BEGIN
+      return "******"
+    if not settings.modules.hide_name or not (@random_type or @arena)
       return player.name
     if (@duel_stage == ygopro.constants.DUEL_STAGE.BEGIN and settings.modules.hide_name == "start") or settings.modules.hide_name == "always"
       return "Player #{player.pos + 1}" 
@@ -2610,7 +2615,26 @@ ygopro.stoc_follow 'JOIN_GAME', false, (buffer, info, client, server, datas)->
   if room.welcome
     ygopro.stoc_send_chat(client, room.welcome, ygopro.constants.COLORS.BABYBLUE)
   if room.welcome2
-    ygopro.stoc_send_chat(client, room.welcome2, ygopro.constants.COLORS.PINK)
+    if room.random_type == 'TT'
+      do (client) ->
+        duelPoints = 1000
+        wins = 0
+        losses = 0
+        try
+          ladderUser = if settings.modules.mysql.enabled then await dataManager.getLadderUser(client.name) else null
+          currentMonth = moment().format('YYYYMM')
+          userMonth = ladderUser and String(ladderUser.monthKey or '').replace(/[^0-9]/g, '')
+          if ladderUser and userMonth == currentMonth
+            duelPoints = ladderUser.monthDuelPoints ? 1000
+            wins = ladderUser.monthWins ? 0
+            losses = ladderUser.monthLosses ? 0
+        catch err
+          log.warn('LADDER WELCOME FAIL', err.toString())
+        totalGames = wins + losses
+        winRate = if totalGames then Number(((wins / totalGames) * 100).toFixed(2)) else 0
+        ygopro.stoc_send_chat(client, "#{client.name}你好，你的本月等级分为#{duelPoints}，胜场为#{wins}，胜率为#{winRate}%,", ygopro.constants.COLORS.PINK)
+    else
+      ygopro.stoc_send_chat(client, room.welcome2, ygopro.constants.COLORS.PINK)
   if settings.modules.arena_mode.enabled and !client.is_local and settings.modules.arena_mode.get_score #and not client.score_shown
     request
       url: settings.modules.arena_mode.get_score + encodeURIComponent(client.name),
@@ -3021,12 +3045,12 @@ ygopro.stoc_follow 'TYPE_CHANGE', true, (buffer, info, client, server, datas)->
 
 ygopro.stoc_follow 'HS_PLAYER_ENTER', true, (buffer, info, client, server, datas)->
   room=ROOM_all[client.rid]
-  if room and (room.random_type or room.arena) and settings.modules.hide_name and room.duel_stage == ygopro.constants.DUEL_STAGE.BEGIN
+  if room and (room.random_type or room.arena) and (settings.modules.hide_name or room.random_type == 'TT') and room.duel_stage == ygopro.constants.DUEL_STAGE.BEGIN
     pos = info.pos
     if pos < 4 and pos != client.pos
       struct = ygopro.structs.get("STOC_HS_PlayerEnter")
       struct._setBuff(buffer)
-      struct.set("name", "Player " + (pos + 1))
+      struct.set("name", if room.random_type == 'TT' then "******" else "Player " + (pos + 1))
       buffer = struct.buffer
   await return false
 
@@ -3225,7 +3249,7 @@ ygopro.stoc_follow 'DUEL_START', true, (buffer, info, client, server, datas)->
       clearInterval client.side_interval
       client.side_interval = null
       client.side_tcount = null
-  if settings.modules.hide_name == "start" and room.duel_count == 0
+  if (settings.modules.hide_name == "start" or room.random_type == 'TT') and room.duel_count == 0
     for player in room.get_playing_player() when player != client
       ygopro.stoc_send(client, 'HS_PLAYER_ENTER', {
         name: player.name,

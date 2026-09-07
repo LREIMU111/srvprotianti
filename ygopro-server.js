@@ -2026,8 +2026,19 @@
           }
           lmd_key = moment_now.format('YYYY-MM');
           (async function(winner_form, loser_form) {
-            await dataManager.tallyLadderResult(winner_form.name_vpass.split('$')[0], winner_form.name_vpass.split('$')[1] || null, true, lmd_key);
-            await dataManager.tallyLadderResult(loser_form.name_vpass.split('$')[0], loser_form.name_vpass.split('$')[1] || null, false, lmd_key);
+            var winnerName = winner_form.name_vpass.split('$')[0];
+            var loserName = loser_form.name_vpass.split('$')[0];
+            var winnerPass = winner_form.name_vpass.split('$')[1] || null;
+            var loserPass = loser_form.name_vpass.split('$')[1] || null;
+            await dataManager.applyLadderMatchResult({
+              monthKey: lmd_key,
+              playerA: { name: winnerName, pass: winnerPass, deck: winner_form.deck || null },
+              playerB: { name: loserName, pass: loserPass, deck: loser_form.deck || null },
+              winnerName: winnerName,
+              loserName: loserName,
+              deckA: winner_form.deck || null,
+              deckB: loser_form.deck || null
+            });
           })(lw_form, ll_form);
         }
       }
@@ -2625,7 +2636,13 @@
     }
 
     getMaskedPlayerName(player, sight_player) {
-      if (!settings.modules.hide_name || (sight_player && player === sight_player) || !(this.random_type || this.arena)) {
+      if (sight_player && player === sight_player) {
+        return player.name;
+      }
+      if (this.random_type === 'TT' && this.duel_stage === ygopro.constants.DUEL_STAGE.BEGIN) {
+        return "******";
+      }
+      if (!settings.modules.hide_name || !(this.random_type || this.arena)) {
         return player.name;
       }
       if ((this.duel_stage === ygopro.constants.DUEL_STAGE.BEGIN && settings.modules.hide_name === "start") || settings.modules.hide_name === "always") {
@@ -3473,7 +3490,30 @@
       ygopro.stoc_send_chat(client, room.welcome, ygopro.constants.COLORS.BABYBLUE);
     }
     if (room.welcome2) {
-      ygopro.stoc_send_chat(client, room.welcome2, ygopro.constants.COLORS.PINK);
+      if (room.random_type === 'TT') {
+        (async () => {
+          let duelPoints = 1000;
+          let wins = 0;
+          let losses = 0;
+          try {
+            const ladderUser = settings.modules.mysql.enabled ? await dataManager.getLadderUser(client.name) : null;
+            const currentMonth = moment().format('YYYYMM');
+            const userMonth = ladderUser && String(ladderUser.monthKey || '').replace(/[^0-9]/g, '');
+            if (ladderUser && userMonth === currentMonth) {
+              duelPoints = ladderUser.monthDuelPoints ?? 1000;
+              wins = ladderUser.monthWins ?? 0;
+              losses = ladderUser.monthLosses ?? 0;
+            }
+          } catch (err) {
+            log.warn('LADDER WELCOME FAIL', err.toString());
+          }
+          const totalGames = wins + losses;
+          const winRate = totalGames ? Number(((wins / totalGames) * 100).toFixed(2)) : 0;
+          ygopro.stoc_send_chat(client, `${client.name}你好，你的本月等级分为${duelPoints}，胜场为${wins}，胜率为${winRate}%,`, ygopro.constants.COLORS.PINK);
+        })();
+      } else {
+        ygopro.stoc_send_chat(client, room.welcome2, ygopro.constants.COLORS.PINK);
+      }
     }
     if (settings.modules.arena_mode.enabled && !client.is_local && settings.modules.arena_mode.get_score) { //and not client.score_shown
       request({
@@ -4042,12 +4082,12 @@
   ygopro.stoc_follow('HS_PLAYER_ENTER', true, async function(buffer, info, client, server, datas) {
     var pos, room, struct;
     room = ROOM_all[client.rid];
-    if (room && (room.random_type || room.arena) && settings.modules.hide_name && room.duel_stage === ygopro.constants.DUEL_STAGE.BEGIN) {
+    if (room && (room.random_type || room.arena) && (settings.modules.hide_name || room.random_type === 'TT') && room.duel_stage === ygopro.constants.DUEL_STAGE.BEGIN) {
       pos = info.pos;
       if (pos < 4 && pos !== client.pos) {
         struct = ygopro.structs.get("STOC_HS_PlayerEnter");
         struct._setBuff(buffer);
-        struct.set("name", "Player " + (pos + 1));
+        struct.set("name", room.random_type === 'TT' ? "******" : "Player " + (pos + 1));
         buffer = struct.buffer;
       }
     }
@@ -4366,7 +4406,7 @@
         client.side_tcount = null;
       }
     }
-    if (settings.modules.hide_name === "start" && room.duel_count === 0) {
+    if ((settings.modules.hide_name === "start" || room.random_type === 'TT') && room.duel_count === 0) {
       ref = room.get_playing_player();
       for (l = 0, len1 = ref.length; l < len1; l++) {
         player = ref[l];
@@ -5326,12 +5366,14 @@
       }
       //console.log(u.query.username, u.query.pass)
       // ===== 定制:静态网页(免登录) =====
-      if (u.pathname === '/' || u.pathname === '/rooms.html' || u.pathname === '/replays.html' || u.pathname === '/ladder.html' || u.pathname === '/dashboard.html') {
+      if (u.pathname === '/' || u.pathname === '/intro.html' || u.pathname === '/rooms.html' || u.pathname === '/replays.html' || u.pathname === '/ladder.html' || u.pathname === '/deck-stats.html' || u.pathname === '/dashboard.html') {
         var webPageMap = {
           '/': 'rooms.html',
+          '/intro.html': 'intro.html',
           '/rooms.html': 'rooms.html',
           '/replays.html': 'replays.html',
           '/ladder.html': 'ladder.html',
+          '/deck-stats.html': 'deck-stats.html',
           '/dashboard.html': 'rooms.html'
         };
         var webPageFile = webPageMap[u.pathname];
@@ -5346,6 +5388,32 @@
             "Content-Type": "text/plain; charset=utf-8"
           });
           response.end("web page not found: " + webPageFile);
+        }
+        return;
+      }
+      // ===== 定制:示例卡组下载(免登录) =====
+      if (_.startsWith(u.pathname, '/example_decks/')) {
+        try {
+          var deckFilename = decodeURIComponent(u.pathname.slice('/example_decks/'.length));
+          if (!deckFilename || deckFilename !== path.basename(deckFilename) || !deckFilename.toLowerCase().endsWith('.ydk')) {
+            response.writeHead(404, {
+              "Content-Type": "text/plain; charset=utf-8"
+            });
+            response.end("deck not found");
+            return;
+          }
+          var deckPath = path.join(__dirname, 'web', 'example_decks', deckFilename);
+          var deckData = await fs.promises.readFile(deckPath);
+          response.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": "attachment"
+          });
+          response.end(deckData);
+        } catch (error1) {
+          response.writeHead(404, {
+            "Content-Type": "text/plain; charset=utf-8"
+          });
+          response.end("deck not found");
         }
         return;
       }
@@ -5377,6 +5445,7 @@
           }
           var replaysStart = (replaysPage - 1) * replaysPageSize;
           var replaysPageNames = allReplayNames.slice(replaysStart, replaysStart + replaysPageSize);
+          var replayDeckBuffers = settings.modules.mysql.enabled && dataManager ? await dataManager.getReplayDeckBuffers(replaysPageNames) : {};
           var replayList = [];
           for (var rfi2 = 0, rfl2 = replaysPageNames.length; rfi2 < rfl2; rfi2++) {
             var replayFile2 = replaysPageNames[rfi2];
@@ -5384,7 +5453,8 @@
             replayList.push({
               name: replayFile2,
               size: replayStat.size,
-              mtime: replayStat.mtime
+              mtime: replayStat.mtime,
+              players: replayDeckBuffers[replayFile2] || []
             });
           }
           response.writeHead(200);
@@ -5408,18 +5478,76 @@
       // ===== 定制:天梯(免登录,只显示名字/胜负,不显示密码) =====
       if (u.pathname === '/api/ladder') {
         var ladderType = u.query.type === 'month' ? 'month' : 'total';
+        var page = parseInt(u.query.page) || 1;
+        var pageSize = parseInt(u.query.pageSize) || 50;
+        var playerSearch = (u.query.search || '').trim().toLowerCase();
+        var rankingBasis = u.query.rankingBasis || null;
         try {
-          var ladderTop = await dataManager.getLadderTop(ladderType, 50);
+          var ladderTop = await dataManager.getLadderTop(ladderType, playerSearch ,page, pageSize, u.query.month || null, rankingBasis);
           response.writeHead(200);
           response.end(addCallback(u.query.callback, JSON.stringify({
             type: ladderType,
-            ladder: ladderTop
+            ladder: ladderTop.users,
+            total: ladderTop.total,
+            rankingBasis: ladderTop.rankingBasis
           })));
         } catch (err4) {
           response.writeHead(200);
           response.end(addCallback(u.query.callback, JSON.stringify({
             type: ladderType,
-            ladder: []
+            ladder: [],
+            total: 0,
+            rankingBasis: dataManager.getLadderRankingBasis(rankingBasis)
+          })));
+        }
+        return;
+      }
+      if (u.pathname === '/api/ladder-config') {
+        response.writeHead(200);
+        response.end(addCallback(u.query.callback, JSON.stringify({
+          rankingBasis: dataManager.getLadderRankingBasis()
+        })));
+        return;
+      }
+      if (u.pathname === '/api/ladder-deck-stats') {
+        var monthKey = (u.query.month || moment().format('YYYYMM')).toString().replace(/[^0-9]/g, '');
+        try {
+          var deckStats = await dataManager.getLadderDeckStats(monthKey);
+          var deckMeta = await loadJSONAsync('./plugins/deck_analysis/deck_analysis.json');
+          var archetypes = deckMeta.archetypes || {};
+          var families = deckMeta.families || {};
+          var groups = (deckMeta.display && deckMeta.display.groups || []).filter(function (group) { return group.isDisplayed !== false; }).sort(function (a, b) { return (a.displayOrder || 0) - (b.displayOrder || 0); });
+          var groupMembers = function (group) {
+            if (group.type === 'single') return [Number(group.archetypeId)];
+            var family = Object.keys(families).filter(function (key) { return Number(families[key].id) === Number(group.familyId); })[0];
+            var familyCode = family || '';
+            var members = Object.keys(archetypes).filter(function (id) {
+              var code = archetypes[id].code || '';
+              return code === familyCode || code.indexOf(familyCode + '_') === 0;
+            }).map(Number);
+            if (group.type === 'custom' && Array.isArray(group.includeBranches)) {
+              return group.includeBranches.map(function (index) { return members[index]; }).filter(function (id) { return Number.isFinite(id); });
+            }
+            return members;
+          };
+          var zero = function () { return { matches: 0, matchWins: 0, firstMatches: 0, firstWins: 0, secondMatches: 0, secondWins: 0, games: 0, gameWins: 0, firstGames: 0, firstGameWins: 0, secondGames: 0, secondGameWins: 0, mainGames: 0, mainGameWins: 0, mainFirstGames: 0, mainFirstGameWins: 0, mainSecondGames: 0, mainSecondGameWins: 0, sideGames: 0, sideGameWins: 0, sideFirstGames: 0, sideFirstGameWins: 0, sideSecondGames: 0, sideSecondGameWins: 0 }; };
+          var add = function (target, source) { Object.keys(target).forEach(function (key) { target[key] += Number(source && source[key] || 0); }); };
+          var stats = {};
+          groups.forEach(function (group) { group.members = groupMembers(group); });
+          groups.forEach(function (row) { groups.forEach(function (column) { var item = zero(); row.members.forEach(function (rowId) { column.members.forEach(function (columnId) { add(item, deckStats.matrix[rowId + '::' + columnId]); }); }); stats[row.id + '::' + column.id] = item; }); });
+          response.writeHead(200);
+          response.end(addCallback(u.query.callback, JSON.stringify({
+            monthKey: monthKey,
+            decks: groups.map(function (group) { return { id: group.id, name: group.name, members: group.members }; }),
+            stats: stats
+          })));
+        } catch (err) {
+          response.writeHead(200);
+          response.end(addCallback(u.query.callback, JSON.stringify({
+            monthKey: monthKey,
+            decks: [],
+            rows: [],
+            stats: {}
           })));
         }
         return;
